@@ -551,3 +551,27 @@ class Dataset():
                             resolution,
                             verbosity = self.verbosity,
                             **kwargs)
+        
+    def to_sequence(self, resolution='residue', transform=IdentityTransform(), **kwargs):
+        """ Converts the raw dataset to a sequence dataset. Each protein is represented by its amino acid sequence.
+    
+        Parameters
+        ----------
+        resolution: str, default 'residue'
+            Resolution of the proteins. This is required by the base class, though it may not be used in sequence representation.
+    
+        transform: callable, default IdentityTransform
+            Optional transform to apply to each protein before extracting the sequence.
+    
+        Returns
+        -------
+        SequenceDataset
+            The dataset in linear sequence representation.
+        """
+        from proteinshake.representations import SequenceDataset 
+        proteins = self.proteins(resolution=resolution)
+        return SequenceDataset(Generator((transform(p) for p in proteins), len(proteins)),
+                               self.root,
+                               self.name,
+                               verbosity=self.verbosity,
+                               **kwargs)
