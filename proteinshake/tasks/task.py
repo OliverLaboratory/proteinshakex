@@ -197,6 +197,10 @@ class Task:
         self.dataset = self.dataset.to_voxel(*args, **kwargs)
         return self
 
+    def to_sequence(self, *args, **kwargs):
+        self.dataset = self.dataset.to_sequence(*args, **kwargs)
+        return self
+
     def pyg(self, *args, **kwargs):
         self.dataset = self.dataset.pyg(*args, **kwargs)
         return self
