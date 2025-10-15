@@ -38,20 +38,19 @@ class SequenceDataset:
     def __init__(self, proteins, root, name, verbosity=2):
         self.verbosity = verbosity
         self.path = f'{root}/processed/sequence/{name}'
-        self.sequences = list(Sequence(protein) for protein in tqdm(proteins, total=len(proteins)))
-        self.size = len(self.sequences)
+        self.sequences = (Sequence(protein) for protein in tqdm(proteins,
+                                                                total=len(proteins)))
+        self.size = len(proteins)
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-
-    def __getitem__(self, idx):
-        seq = self.sequences[idx]
-        return {
-            'sequence': torch.tensor(seq.tokens, dtype=torch.long),
-            'id': idx,
-        }
 
     def strings(self):
         """ Returns all sequences as plain amino acid strings. """
-        return [seq.sequence for seq in self.sequences]
+        return (seq.sequence for seq in self.sequences)
+
+
+    def torch(self, *args, **kwargs):
+        from proteinshake.frameworks.torch import TorchSequenceDataset
+        return TorchSequenceDataset(self.sequences, self.size, self.path+'.pyg', verbosity=self.verbosity, *args, **kwargs)
 
     def numpy(self):
         """ Returns all tokenized sequences as a list of NumPy arrays. """
