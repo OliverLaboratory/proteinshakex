@@ -1,0 +1,11 @@
+{
+  "deposit_id": 18257538,
+  "record_id": 18257538,
+  "record_url": "https://zenodo.org/records/18257538",
+  "doi": "10.5281/zenodo.18257538",
+  "uploaded_files": [
+    "FunctionalSiteDataset.residue.avro",
+    "FunctionalSiteDataset.atom.avro"
+  ],
+  "dataset_name": "FunctionalSiteDataset"
+}

@@ -47,3 +47,9 @@ coverage.xml
 .venv
 *.out
 *.pt
+
+# Zenodo and data directories
+roots/
+zenodo_record.json
+ZENODO.txt
+data_test/

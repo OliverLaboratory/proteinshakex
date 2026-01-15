@@ -64,29 +64,135 @@ def fx2str(fx):
     """
     return re.sub('(<.*?)\\s.*(>)', r'\1\2', fx.__repr__())
 
-def avro_schema_from_protein(protein):
+def avro_schema_from_protein(protein, proteins=None):
     """ Guesses the avro schema from a dictionary.
 
     Parameters
     ----------
     protein: dict
         A protein dictionary.
+    proteins: list, optional
+        List of all proteins to check for union types (e.g., string or list).
 
     Returns
     -------
     schema
         An avro schema.
     """
-    typedict = {'int':'int', 'float':'float', 'str':'string', 'bool':'boolean'}
-    def field_spec(k,v):
-        if type(v) == dict:
-            return {'name':k, 'type':{'name':k, 'type':'record', 'fields': [field_spec(_k,_v) for _k,_v in v.items()]}}
-        elif type(v) == list:
-            return {'name':k, 'type':{'type': 'array', 'items': typedict[type(v[0]).__name__] if len(v)>0 else 'string'}}
-        elif type(v).__name__ in typedict:
-            return {'name':k, 'type': typedict[type(v).__name__]}
+    typedict = {'int':'int', 'float':'float', 'str':'string', 'bool':'boolean', 
+                'int64':'int', 'int32':'int', 'float64':'float', 'float32':'float',
+                'str_':'string', 'bool_':'boolean'}
+    
+    def get_type_name(v):
+        """Get the type name, handling numpy types."""
+        if isinstance(v, np.integer):
+            return 'int'
+        elif isinstance(v, np.floating):
+            return 'float'
+        elif isinstance(v, np.bool_):
+            return 'bool'
+        elif isinstance(v, (str, np.str_)):
+            return 'str'
         else:
-            raise TypeError(f"All fields in a protein object need to be either int, float, bool or string, not {type(v).__name__}")
+            return type(v).__name__
+    
+    def check_mixed_types(key_path, proteins):
+        """Check if a field has mixed types (string and list) across all proteins.
+        
+        For array fields, checks if elements can be either string or list.
+        """
+        if proteins is None or len(proteins) == 0:
+            return False
+        
+        has_string = False
+        has_list = False
+        
+        for p in proteins:
+            value = p
+            for k in key_path:
+                if isinstance(value, dict) and k in value:
+                    value = value[k]
+                else:
+                    break
+            else:
+                # Successfully navigated to the value
+                # If value is a list, check its elements
+                if isinstance(value, list):
+                    for elem in value:
+                        if isinstance(elem, str) and elem != '':
+                            has_string = True
+                        elif isinstance(elem, list):
+                            has_list = True
+                        if has_string and has_list:
+                            return True
+                elif isinstance(value, str):
+                    has_string = True
+                elif isinstance(value, list):
+                    has_list = True
+                if has_string and has_list:
+                    return True
+        return False
+
+    def field_spec(k,v, key_path=[]):
+        current_path = key_path + [k]
+        
+        if type(v) == dict:
+            return {'name':k, 'type':{'name':k, 'type':'record', 'fields': [field_spec(_k,_v, current_path) for _k,_v in v.items()]}}
+        elif type(v) == list:
+            if len(v) > 0:
+                # Check if list contains lists (nested arrays)
+                if type(v[0]) == list:
+                    # Nested list - check what the inner list contains
+                    if len(v[0]) > 0:
+                        if type(v[0][0]) == dict:
+                            # List of lists of dictionaries - array of (array of records)
+                            return {'name':k, 'type':{'type': 'array', 'items': {'type': 'array', 'items': {'name': f'{k}_item', 'type':'record', 'fields': [field_spec(_k,_v, current_path + ['_item']) for _k,_v in v[0][0].items()]}}}}
+                        else:
+                            # List of lists of primitives - array of (array of primitives)
+                            type_name = get_type_name(v[0][0])
+                            if type_name in typedict:
+                                return {'name':k, 'type':{'type': 'array', 'items': {'type': 'array', 'items': typedict[type_name]}}}
+                            else:
+                                return {'name':k, 'type':{'type': 'array', 'items': {'type': 'array', 'items': 'string'}}}
+                    else:
+                        # Empty inner list - default to array of string arrays
+                        return {'name':k, 'type':{'type': 'array', 'items': {'type': 'array', 'items': 'string'}}}
+                # Check if list contains dictionaries
+                elif type(v[0]) == dict:
+                    # List of dictionaries - create a record type for the items
+                    return {'name':k, 'type':{'type': 'array', 'items': {'name': f'{k}_item', 'type':'record', 'fields': [field_spec(_k,_v, current_path + ['_item']) for _k,_v in v[0].items()]}}}
+                else:
+                    # Check if list elements can be either string or list (union type)
+                    # This handles cases like functional_sites where elements can be string or list of strings
+                    if check_mixed_types(current_path, proteins):
+                        # Elements can be string or list of strings
+                        return {'name':k, 'type':{'type': 'array', 'items': ['string', {'type': 'array', 'items': 'string'}]}}
+                    
+                    # List of primitive types - handle numpy types
+                    type_name = get_type_name(v[0])
+                    if type_name in typedict:
+                        return {'name':k, 'type':{'type': 'array', 'items': typedict[type_name]}}
+                    else:
+                        return {'name':k, 'type':{'type': 'array', 'items': 'string'}}
+            else:
+                # Empty list - check if this field has mixed types across proteins
+                if check_mixed_types(current_path, proteins):
+                    return {'name':k, 'type':{'type': 'array', 'items': ['string', {'type': 'array', 'items': 'string'}]}}
+                # Default to string array
+                return {'name':k, 'type':{'type': 'array', 'items': 'string'}}
+        else:
+            # Check if this field has mixed types (string and list) across all proteins
+            # This handles cases like functional_sites which can be string or list
+            if check_mixed_types(current_path, proteins):
+                # Create a union type: ["string", {"type": "array", "items": "string"}]
+                return {'name':k, 'type': ['string', {'type': 'array', 'items': 'string'}]}
+            
+            # Handle numpy types and regular types
+            type_name = get_type_name(v)
+            if type_name in typedict:
+                return {'name':k, 'type': typedict[type_name]}
+            else:
+                raise TypeError(f"All fields in a protein object need to be either int, float, bool or string, not {type_name}")
     schema = {
         'name': 'Protein',
         'namespace': 'Dataset',
@@ -106,9 +212,20 @@ def write_avro(proteins, path):
         The path to the output file.
     """
     path = Path(path)
-    schema = avro_schema_from_protein(proteins[0])
-    with open(path, 'wb') as file:
-        avro_writer(file, schema, proteins, metadata={'number_of_proteins':str(len(proteins))})
+    if len(proteins) == 0:
+        # If no proteins, create an empty file with a minimal schema
+        empty_protein = {
+            'protein': {'ID': ''},
+            'residue': {'residue_number': [], 'residue_type': [], 'x': [], 'y': [], 'z': [], 'SASA': [], 'RSA': []},
+            'atom': {'atom_number': [], 'atom_type': [], 'residue_number': [], 'residue_type': [], 'x': [], 'y': [], 'z': [], 'SASA': []}
+        }
+        schema = avro_schema_from_protein(empty_protein)
+        with open(path, 'wb') as file:
+            avro_writer(file, schema, [], metadata={'number_of_proteins': '0'})
+    else:
+        schema = avro_schema_from_protein(proteins[0], proteins=proteins)
+        with open(path, 'wb') as file:
+            avro_writer(file, schema, proteins, metadata={'number_of_proteins':str(len(proteins))})
 
 def save(obj, path):
     """ Saves an object to either pickle, json, or json.gz (determined by the extension in the file name).

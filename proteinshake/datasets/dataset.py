@@ -2,10 +2,11 @@
 """
 Base dataset class for protein 3D structures.
 """
-import os, gzip, inspect, time, itertools, tarfile, io, requests
+import os, gzip, inspect, time, itertools, tarfile, io, requests, json
 import copy
 from collections import defaultdict, Counter
 from functools import cached_property
+from pathlib import Path
 import multiprocessing as mp
 
 import pandas as pd
@@ -97,6 +98,8 @@ class Dataset():
         If True, skips the signature check. 
     verbosity: int, default 2
         Verbosity level of output logging. 2: full output, 1: no progress bars, 0: only warnings and errors, -1: only errors, -2: no output.
+    upload_to_zenodo: bool, default False
+        If True, uploads the generated avro files to Zenodo after creation. Requires ZENODO.txt file with access token.
     """
 
     additional_files = [] # indicates the additional file names that are to be included in the release
@@ -114,6 +117,7 @@ class Dataset():
             exclude_ids                    = [],
             skip_signature_check           = False,
             verbosity                      = 2,
+            upload_to_zenodo               = False,
             # center                         = True, Put back after submission
             # random_rotate                  = True
             ):
@@ -122,6 +126,24 @@ class Dataset():
         self.n_jobs = n_jobs
         # self.random_rotate = random_rotate
         # self.center = center
+        
+        # Use the shared Zenodo record for all datasets
+        # Check for global zenodo record metadata (shared across all datasets)
+        global_zenodo_path = 'zenodo_record.json'
+        if os.path.exists(global_zenodo_path):
+            try:
+                with open(global_zenodo_path, 'r') as f:
+                    metadata = json.load(f)
+                    record_id = metadata.get('latest_record_id')
+                    if record_id:
+                        self.repository_url = f'https://zenodo.org/record/{record_id}/files'
+            except Exception:
+                pass  # Fall back to default repository_url
+        
+        # If no global metadata, use the base record ID
+        if self.repository_url == f'https://zenodo.org/records/15259912/files':
+            self.repository_url = 'https://zenodo.org/record/18257698/files'
+        
         if use_precomputed and not self.precomputed_already_downloaded() and not self.precomputed_available():
             warning('Could not find precomputed file in the ProteinShake data repository. Setting use_precomputed to False. The dataset will be processed locally.', verbosity=verbosity)
             use_precomputed = False
@@ -134,6 +156,7 @@ class Dataset():
         self.exclude_ids = exclude_ids
         self.skip_signature_check = skip_signature_check
         self.verbosity = verbosity
+        self.upload_to_zenodo = upload_to_zenodo
         
         os.makedirs(f'{self.root}', exist_ok=True)
         #self.check_signature()
@@ -141,14 +164,55 @@ class Dataset():
         if not use_precomputed:
             self.start_download()
             self.parse()
+            # Upload to Zenodo if requested
+            if upload_to_zenodo:
+                self.zenodo_upload()
         else:
             pass#self.check_signature_same_as_hosted()
 
     def precomputed_already_downloaded(self):
         return os.path.exists(f'{self.root}/{self.name}.residue.avro') or os.path.exists(f'{self.root}/{self.name}.atom.avro')
     
+    def get_zenodo_record_id(self):
+        """Get the latest Zenodo record ID from global metadata.
+        
+        Returns
+        -------
+        int
+            Latest Zenodo record ID, defaults to 18257698.
+        """
+        global_zenodo_path = 'zenodo_record.json'
+        if os.path.exists(global_zenodo_path):
+            try:
+                with open(global_zenodo_path, 'r') as f:
+                    metadata = json.load(f)
+                    record_id = metadata.get('latest_record_id')
+                    if record_id:
+                        return record_id
+            except Exception:
+                pass
+        # Default to base record ID
+        return 18257698
+    
     def precomputed_available(self):
-        return requests.head(f'{self.repository_url}/{self.name}.residue.avro.gz', timeout=5).status_code == 200
+        # Check Zenodo using the shared record ID
+        record_id = self.get_zenodo_record_id()
+        try:
+            # Try gzipped version first (follow redirects)
+            zenodo_file_url = f'https://zenodo.org/record/{record_id}/files/{self.name}.residue.avro.gz'
+            resp = requests.head(zenodo_file_url, timeout=10, allow_redirects=True)
+            if resp.status_code == 200:
+                return True
+            # Try non-gzipped version
+            zenodo_file_url = f'https://zenodo.org/record/{record_id}/files/{self.name}.residue.avro'
+            resp = requests.head(zenodo_file_url, timeout=10, allow_redirects=True)
+            if resp.status_code == 200:
+                return True
+        except:
+            pass
+        
+        # Fallback to default repository
+        return requests.head(f'{self.repository_url}/{self.name}.residue.avro.gz', timeout=10, allow_redirects=True).status_code == 200
 
     def compute_signature(self, use_defaults=False):
         signature = dict(inspect.signature(self.__init__).parameters.items())
@@ -295,10 +359,286 @@ class Dataset():
         self.download()
         self.download_complete()
 
+    def get_zenodo_url(self):
+        """Get Zenodo URL from stored metadata if available.
+        
+        Returns
+        -------
+        str or None
+            Zenodo record URL if available, None otherwise.
+        """
+        zenodo_metadata_path = f'{self.root}/zenodo_metadata.json'
+        if os.path.exists(zenodo_metadata_path):
+            try:
+                with open(zenodo_metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    return metadata.get('record_url')
+            except Exception as e:
+                if self.verbosity > 0:
+                    warning(f'Failed to read Zenodo metadata: {str(e)}', verbosity=self.verbosity)
+        return None
+    
+    def read_zenodo_token(self):
+        """Read Zenodo access token from ZENODO.txt file.
+        
+        Returns
+        -------
+        str or None
+            Access token if found, None otherwise.
+        """
+        # Try to find ZENODO.txt in current directory or project root
+        possible_paths = [
+            'ZENODO.txt',
+            os.path.join(os.path.dirname(__file__), '..', '..', 'ZENODO.txt'),
+            os.path.join(Path(__file__).parent.parent.parent, 'ZENODO.txt')
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        token = f.read().strip()
+                        if token:
+                            return token
+                except Exception as e:
+                    if self.verbosity > 0:
+                        warning(f'Failed to read ZENODO.txt: {str(e)}', verbosity=self.verbosity)
+        
+        return None
+    
+    def zenodo_upload(self):
+        """Upload avro files to Zenodo and store the record URL.
+        
+        Creates a new version of the existing Zenodo record (18257698), uploads residue and atom avro files,
+        and publishes the new version. Updates the global record ID for future use.
+        """
+        token = self.read_zenodo_token()
+        if not token:
+            error('Zenodo access token not found in ZENODO.txt. Cannot upload to Zenodo.', verbosity=self.verbosity)
+            return
+        
+        # Check if avro files exist
+        residue_avro = f'{self.root}/{self.name}.residue.avro'
+        atom_avro = f'{self.root}/{self.name}.atom.avro'
+        
+        if not os.path.exists(residue_avro) and not os.path.exists(atom_avro):
+            error('No avro files found to upload to Zenodo.', verbosity=self.verbosity)
+            return
+        
+        if self.verbosity > 0:
+            print('Uploading dataset to Zenodo...')
+        
+        # Zenodo API endpoints
+        base_url = 'https://zenodo.org/api/deposit/depositions'
+        headers = {'Authorization': f'Bearer {token}'}
+        
+        try:
+            # 1. Get the latest record ID and create a new version
+            latest_record_id = self.get_zenodo_record_id()
+            
+            if self.verbosity > 0:
+                print(f'Creating new version of record {latest_record_id}...')
+            
+            # Create new version
+            newversion_url = f'{base_url}/{latest_record_id}/actions/newversion'
+            resp = requests.post(newversion_url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            newversion_data = resp.json()
+            
+            # Extract the new draft deposition ID
+            latest_draft_url = newversion_data['links']['latest_draft']
+            import re
+            match = re.search(r'/deposit/depositions/(\d+)$', latest_draft_url)
+            if not match:
+                raise RuntimeError('Could not parse new version deposition ID')
+            deposit_id = int(match.group(1))
+            bucket_url = newversion_data['links']['bucket']
+            
+            if self.verbosity > 0:
+                print(f'Created new version draft: deposition {deposit_id}')
+            
+            # 2. Upload avro files
+            uploaded_files = []
+            for avro_file, file_type in [(residue_avro, 'residue'), (atom_avro, 'atom')]:
+                if os.path.exists(avro_file):
+                    filename = os.path.basename(avro_file)
+                    file_url = f'{bucket_url}/{filename}'
+                    
+                    # Retry logic for rate limiting and network issues
+                    max_retries = 5
+                    retry_delay = 10  # Start with 10 seconds
+                    file_size = os.path.getsize(avro_file)
+                    if self.verbosity > 0:
+                        print(f'Uploading {filename} ({file_size / (1024*1024):.1f} MB)...')
+                    
+                    uploaded = False
+                    for attempt in range(max_retries):
+                        try:
+                            with open(avro_file, 'rb') as fp:
+                                upload_resp = requests.put(file_url, data=fp, headers=headers, timeout=600, verify=True)
+                                upload_resp.raise_for_status()
+                                uploaded_files.append(filename)
+                                uploaded = True
+                            
+                            if self.verbosity > 0:
+                                print(f'✓ Uploaded {filename}')
+                            break
+                        except requests.exceptions.HTTPError as e:
+                            if e.response.status_code == 429:  # Rate limited
+                                if attempt < max_retries - 1:
+                                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                                    if self.verbosity > 0:
+                                        print(f'Rate limited. Waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}...')
+                                    time.sleep(wait_time)
+                                    continue
+                                else:
+                                    error(f'Rate limited after {max_retries} attempts. Please wait and try again later.', verbosity=self.verbosity)
+                                    raise
+                            else:
+                                error(f'HTTP error uploading {filename}: {str(e)}', verbosity=self.verbosity)
+                                raise
+                        except requests.exceptions.SSLError as e:
+                            if attempt < max_retries - 1:
+                                if self.verbosity > 0:
+                                    warning(f'SSL error uploading {filename}, retrying with verify=False: {str(e)}', verbosity=self.verbosity)
+                                # Retry with SSL verification disabled
+                                try:
+                                    with open(avro_file, 'rb') as fp:
+                                        upload_resp = requests.put(file_url, data=fp, headers=headers, timeout=600, verify=False)
+                                        upload_resp.raise_for_status()
+                                        uploaded_files.append(filename)
+                                        uploaded = True
+                                    if self.verbosity > 0:
+                                        print(f'✓ Uploaded {filename} (retry successful)')
+                                    break
+                                except Exception as retry_e:
+                                    if attempt < max_retries - 1:
+                                        wait_time = retry_delay * (2 ** attempt)
+                                        if self.verbosity > 0:
+                                            print(f'Retry failed. Waiting {wait_time} seconds before next attempt...')
+                                        time.sleep(wait_time)
+                                        continue
+                                    else:
+                                        error(f'Failed to upload {filename} after {max_retries} attempts: {str(retry_e)}', verbosity=self.verbosity)
+                                        raise
+                            else:
+                                error(f'SSL error uploading {filename}: {str(e)}', verbosity=self.verbosity)
+                                raise
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                wait_time = retry_delay * (2 ** attempt)
+                                if self.verbosity > 0:
+                                    print(f'Upload failed. Waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}...')
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                error(f'Failed to upload {filename} after {max_retries} attempts: {str(e)}', verbosity=self.verbosity)
+                                raise
+                    
+                    if not uploaded:
+                        error(f'Failed to upload {filename} after all retries', verbosity=self.verbosity)
+                        raise Exception(f'Could not upload {filename}')
+            
+            # 3. Publish the new version
+            publish_url = f'{base_url}/{deposit_id}/actions/publish'
+            publish_resp = requests.post(publish_url, headers=headers, timeout=30)
+            publish_resp.raise_for_status()
+            published_deposit = publish_resp.json()
+            
+            # Get the new record ID (this will be the new version number)
+            record_id = published_deposit.get('id', deposit_id)
+            record_url = published_deposit.get('links', {}).get('html', '') or published_deposit.get('links', {}).get('record_html', '')
+            if not record_url:
+                # Construct from record ID
+                record_url = f'https://zenodo.org/record/{record_id}'
+            
+            # Also get DOI if available
+            doi = published_deposit.get('doi', '')
+            if not doi and 'metadata' in published_deposit:
+                doi = published_deposit['metadata'].get('doi', '')
+            
+            # 4. Update global Zenodo record metadata (shared across all datasets)
+            global_zenodo_path = 'zenodo_record.json'
+            global_metadata = {
+                'latest_record_id': record_id,
+                'latest_record_url': record_url,
+                'latest_doi': doi,
+                'last_updated': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            # Also store dataset-specific metadata
+            zenodo_metadata = {
+                'deposit_id': deposit_id,
+                'record_id': record_id,
+                'record_url': record_url,
+                'doi': doi,
+                'uploaded_files': uploaded_files,
+                'dataset_name': self.name,
+                'version': published_deposit.get('metadata', {}).get('version', '')
+            }
+            
+            # Save global metadata
+            with open(global_zenodo_path, 'w') as f:
+                json.dump(global_metadata, f, indent=2)
+            
+            # Save dataset-specific metadata
+            zenodo_metadata_path = f'{self.root}/zenodo_metadata.json'
+            with open(zenodo_metadata_path, 'w') as f:
+                json.dump(zenodo_metadata, f, indent=2)
+            
+            if self.verbosity > 0:
+                print(f'Published new version to Zenodo: {record_url}')
+                print(f'New record ID: {record_id}')
+                print(f'Global metadata saved to {global_zenodo_path}')
+                print(f'Dataset metadata saved to {zenodo_metadata_path}')
+            
+            # Update repository_url to use the latest Zenodo record
+            self.repository_url = f'https://zenodo.org/record/{record_id}/files'
+            
+        except requests.exceptions.RequestException as e:
+            error(f'Failed to upload to Zenodo: {str(e)}', verbosity=self.verbosity)
+            if self.verbosity > 1:
+                import traceback
+                traceback.print_exc()
+        except Exception as e:
+            error(f'Unexpected error during Zenodo upload: {str(e)}', verbosity=self.verbosity)
+            if self.verbosity > 1:
+                import traceback
+                traceback.print_exc()
+    
     def download_precomputed(self, resolution='residue'):
-        """ Downloads the precomputed dataset from the ProteinShake repository.
+        """ Downloads the precomputed dataset from Zenodo or the ProteinShake repository.
         """
         if not os.path.exists(f'{self.root}/{self.name}.{resolution}.avro'):
+            # Use the shared Zenodo record ID
+            record_id = self.get_zenodo_record_id()
+            
+            # Try gzipped version first
+            zenodo_file_url = f'https://zenodo.org/record/{record_id}/files/{self.name}.{resolution}.avro.gz'
+            
+            if self.verbosity > 0:
+                print(f'Downloading from Zenodo record {record_id}: {zenodo_file_url}')
+            
+            try:
+                download_url(zenodo_file_url, f'{self.root}', verbosity=self.verbosity)
+                if self.verbosity > 0: print('Unzipping...')
+                unzip_file(f'{self.root}/{self.name}.{resolution}.avro.gz')
+                return
+            except Exception as e:
+                # Try non-gzipped version (files on Zenodo might not be gzipped)
+                try:
+                    zenodo_file_url = f'https://zenodo.org/record/{record_id}/files/{self.name}.{resolution}.avro'
+                    if self.verbosity > 0:
+                        print(f'Gzipped version not found, trying non-gzipped: {zenodo_file_url}')
+                    # Download directly to the expected location
+                    target_path = f'{self.root}/{self.name}.{resolution}.avro'
+                    download_url(zenodo_file_url, target_path, verbosity=self.verbosity)
+                    return
+                except Exception as e2:
+                    if self.verbosity > 0:
+                        warning(f'Failed to download from Zenodo (both gzipped and non-gzipped), falling back to repository: {str(e2)}', verbosity=self.verbosity)
+            
+            # Fallback to default repository
             download_url(f'{self.repository_url}/{self.name}.{resolution}.avro.gz', f'{self.root}', verbosity=self.verbosity)
             if self.verbosity > 0: print('Unzipping...')
             unzip_file(f'{self.root}/{self.name}.{resolution}.avro.gz')
@@ -326,7 +666,14 @@ class Dataset():
             seeds = (abs(hash(p['protein']['sequence'])) % 2**28 for p in proteins)
             proteins = [RandomRotateTransform(seed=seed)(p) for seed, p in zip(seeds, proteins)]
 
-        residue_proteins = [{'protein':p['protein'], 'residue':p['residue']} for p in proteins]
+        # Include 'sites' key if present (for FunctionalSiteDataset, MCSADataset, etc.)
+        residue_proteins = []
+        for p in proteins:
+            residue_protein = {'protein': p['protein'], 'residue': p['residue']}
+            if 'sites' in p:
+                residue_protein['sites'] = p['sites']
+            residue_proteins.append(residue_protein)
+        
         atom_proteins = [{'protein':p['protein'], 'atom':p['atom']} for p in proteins]
         write_avro(residue_proteins, f'{self.root}/{self.name}.residue.avro')
         write_avro(atom_proteins, f'{self.root}/{self.name}.atom.avro')
