@@ -11,6 +11,7 @@ from .scop import SCOPDataset
 from .protein_ligand_decoys import ProteinLigandDecoysDataset
 from .functional_site import FunctionalSiteDataset
 from .mcsa import MCSADataset
+from .misato_protein_ligand_interface import MisatoProteinLigandDataset
 
 __all__ = [
     'Dataset',
@@ -25,7 +26,8 @@ __all__ = [
     'TMAlignDataset',
     'ProteinLigandDecoysDataset',
     'FunctionalSiteDataset',
-    'MCSADataset'
+    'MCSADataset',
+    'MisatoProteinLigandDataset'
     ]
 
 classes = __all__
