@@ -12,13 +12,12 @@ It produces an Avro dataset that ProteinShake can consume for graph-based learni
 Behavior:
 - If use_precomputed=True: the class uses a baked-in Sandbox Zenodo URL (or env override)
   to download a single local Avro at {root}/{name}.residue.avro and NEVER uses the parent
-  class' precomputed link. No need to pass a URL in main.
+  class’ precomputed link. No need to pass a URL in main.
 """
 
 import os
 import re
 import time
-import json
 import pickle
 import shutil
 from pathlib import Path
@@ -67,14 +66,13 @@ def _load_mappings(mapdir: Path):
 def _h5_entries(f: h5py.File, struct: str, frame: int):
     """
     Extract arrays for a given protein structure and frame.
-    Returns: (traj, atoms_type, atoms_number, atoms_residue, mol_start)
+    Returns: (traj, atoms_type, atoms_number, atoms_residue)
     """
     traj = f[f'{struct}/trajectory_coordinates'][frame]
     atoms_type = f[f'{struct}/atoms_type'][:]
     atoms_number = f[f'{struct}/atoms_number'][:]
     atoms_residue = f[f'{struct}/atoms_residue'][:]
-    mol_start = f[f'{struct}/molecules_begin_atom_index'][:]
-    return traj, atoms_type, atoms_number, atoms_residue, mol_start
+    return traj, atoms_type, atoms_number, atoms_residue
 
 
 def _atom_name(i, atoms_number, residue_atom_index, residue_name, type_string, name_map):
@@ -103,7 +101,7 @@ def _update_residue_indices(residue_number, i, type_string, atoms_type,
 
 
 def _count_ca_atoms_frame(coords, atoms_type, atoms_number, atoms_residue,
-                          mol_start, type_map, residue_map, name_map):
+                          type_map, residue_map, name_map):
     """Extract all Cα atoms for a single frame. Returns list of tuples."""
     ca_atoms = []
     residue_number = 1
@@ -129,16 +127,16 @@ def _count_ca_atoms_frame(coords, atoms_type, atoms_number, atoms_residue,
 
 def _export_one_struct(struct: str, md_path: Path, mapdir: Path,
                        out_dir: Path, num_frames: int) -> str:
-    """Export one protein's CA-only trajectory into a stacked PDB file."""
+    """Export one protein’s CA-only trajectory into a stacked PDB file."""
     residue_map, type_map, name_map = _load_mappings(mapdir)
     all_frames_ca = []
     with h5py.File(md_path, 'r', locking=False) as f:
         available = f[f'{struct}/trajectory_coordinates'].shape[0]
         n = min(num_frames, available)
         for frame in range(n):
-            coords, atoms_type, atoms_number, atoms_residue, mol_start = _h5_entries(f, struct, frame)
+            coords, atoms_type, atoms_number, atoms_residue = _h5_entries(f, struct, frame)
             ca_atoms = _count_ca_atoms_frame(coords, atoms_type, atoms_number,
-                                             atoms_residue, mol_start, type_map, residue_map, name_map)
+                                             atoms_residue, type_map, residue_map, name_map)
             for (resno, resname, x, y, z, elem) in ca_atoms:
                 all_frames_ca.append((frame, resno, resname, x, y, z, elem))
 
@@ -228,8 +226,7 @@ class MisatoProteinLigandDataset(Dataset):
 
     description = "MISATO CA-only (100 frames) + PDBbind binding metadata + binding_site"
 
-    # ✅ Set this once to your Sandbox Zenodo link (or override via env MISATO_PRECOMPUTED_URL)
-    PRECOMPUTED_URL = "https://sandbox.zenodo.org/records/327402/files/MisatoProteinLigandDataset.residue.avro?download=1"
+    PRECOMPUTED_URL = "https://sandbox.zenodo.org/records/429595/files/MisatoProteinLigandDataset.residue.avro?download=1"
 
     # ---- convenience: always coerce to Path when doing path math ----
     @property
@@ -240,11 +237,12 @@ class MisatoProteinLigandDataset(Dataset):
                  root: str = "data",
                  mapdir: Optional[str] = None,
                  index_path: Optional[str] = None,
+                 index_other_path: Optional[str] = None,
                  pocket_root: Optional[str] = None,
                  num_frames: int = 100,
                  max_pdbs: Optional[int] = None,
                  pdb_out_dir: Optional[str] = None,
-                 precomputed_avro: Optional[str] = None,   # optional local override
+                 precomputed_avro: Optional[str] = None,  
                  use_precomputed: bool = False,
                  n_jobs: int = 8,
                  verbosity: int = 2,
@@ -267,10 +265,27 @@ class MisatoProteinLigandDataset(Dataset):
 
         # path-like fields derived from root
         self.mapdir = Path(mapdir) if mapdir else self.root_path / "raw" / "files"
-        self.index_path = Path(index_path) if index_path else self.root_path / "raw" / "files" / "INDEX_refined_data.2020?download=1"
+        index_source = index_path or index_other_path
+        # prefer a local plain-text index (if checked out) before falling back to download
+        local_index = self.root_path.parent / "PDBbind_v2020_plain_text_index 2" / "index" / "INDEX_general_PL_data.2020"
+        if not index_source and local_index.exists():
+            index_source = local_index
+        self.index_path = Path(index_source) if index_source else self.root_path / "raw" / "files" / "INDEX_general_PL_data.2020?download=1"
         self.pocket_root = Path(pocket_root) if pocket_root else self.root_path / "raw" / "files" / "pockets"
         self.md_path = self.root_path / "raw" / "files" / "MD.hdf5"
         self.pdb_out_dir = Path(pdb_out_dir) if pdb_out_dir else (self.root_path / "raw" / "updated_residue_data")
+
+        base_pocket_root = self.pocket_root
+        base_files_root = base_pocket_root.parent
+        self._pocket_roots = []
+        for p in [
+            base_pocket_root,
+            base_files_root,
+            base_files_root / "refined-set",
+            base_files_root / "v2020-other-PL",
+        ]:
+            if p not in self._pocket_roots:
+                self._pocket_roots.append(p)
 
         # call base Dataset init with use_precomputed=False to avoid parent fetching its own link
         super().__init__(root=root,
@@ -327,9 +342,8 @@ class MisatoProteinLigandDataset(Dataset):
         if dst.exists():
             return
 
-        # If Zenodo saved literally with '?download=1' or trimmed, rename it
-        base = os.path.basename(self.precomputed_url)       # e.g., "file.avro?download=1"
-        no_q = base.split('?', 1)[0]                        # e.g., "file.avro"
+        base = os.path.basename(self.precomputed_url)      
+        no_q = base.split('?', 1)[0]                        
         for p in [
             dst.parent / base,
             dst.parent / no_q,
@@ -372,8 +386,12 @@ class MisatoProteinLigandDataset(Dataset):
                 lig_id = post.split("(")[1].rstrip(")")
                 if lig_id.endswith('-mer'):
                     continue
+                try:
+                    resolution = float(res)
+                except ValueError:
+                    resolution = None
                 data[pdbid] = {
-                    'resolution': float(res),
+                    'resolution': resolution,
                     'date': int(date),
                     'kd': kd,
                     'neglog_aff': float(neglog),
@@ -382,33 +400,61 @@ class MisatoProteinLigandDataset(Dataset):
         return data
 
     def download_labels(self):
-        """Download PDBbind refined set, index, and mappings from Zenodo sandbox."""
+        """Download PDBbind refined/other sets, general PL index (for affinities), and mappings from Zenodo sandbox."""
+        refined_url = 'https://sandbox.zenodo.org/records/429595/files/PDBbind_v2020_refined.tar.gz?download=1'
+        other_url = 'https://sandbox.zenodo.org/records/429595/files/PDBbind_v2020_other_PL.tar.gz?download=1'
+
+        def _ensure_tar(tar_path: Path, url: str, min_mb: int):
+            if tar_path.exists() and tar_path.stat().st_size >= min_mb * 1024 * 1024:
+                return
+            download_url(url, str(tar_path.parent))
+
+        refined_tar = self.root_path / 'raw' / 'PDBbind_v2020_refined.tar.gz?download=1'
+        other_tar = self.root_path / 'raw' / 'PDBbind_v2020_other_PL.tar.gz?download=1'
+        _ensure_tar(refined_tar, refined_url, min_mb=600)
+        _ensure_tar(other_tar, other_url, min_mb=200)
+
+        if not self.index_path.exists():
+            download_url(
+                'https://sandbox.zenodo.org/records/429595/files/INDEX_general_PL_data.2020?download=1',
+                str(self.root_path / 'raw' / 'files')
+            )
         download_url(
-            'https://sandbox.zenodo.org/records/327402/files/PDBbind_v2020_refined.tar.gz?download=1',
-            str(self.root_path / 'raw')
-        )
-        download_url(
-            'https://sandbox.zenodo.org/records/327402/files/INDEX_refined_data.2020?download=1',
+            'https://sandbox.zenodo.org/records/429595/files/atoms_name_map_for_pdb.pickle?download=1',
             str(self.root_path / 'raw' / 'files')
         )
         download_url(
-            'https://sandbox.zenodo.org/records/327402/files/atoms_name_map_for_pdb.pickle?download=1',
+            'https://sandbox.zenodo.org/records/429595/files/atoms_residue_map.pickle?download=1',
             str(self.root_path / 'raw' / 'files')
         )
         download_url(
-            'https://sandbox.zenodo.org/records/327402/files/atoms_residue_map.pickle?download=1',
+            'https://sandbox.zenodo.org/records/429595/files/atoms_type_map.pickle?download=1',
             str(self.root_path / 'raw' / 'files')
         )
-        download_url(
-            'https://sandbox.zenodo.org/records/327402/files/atoms_type_map.pickle?download=1',
-            str(self.root_path / 'raw' / 'files')
-        )
-        extract_tar(
-            str(self.root_path / 'raw' / 'PDBbind_v2020_refined.tar.gz?download=1'),
-            str(self.root_path / 'raw' / 'files'),
-            extract_members=True,
-            strip=1
-        )
+        def _extract_with_retry(tar_path: Path, url: str):
+            try:
+                extract_tar(
+                    str(tar_path),
+                    str(self.root_path / 'raw' / 'files'),
+                    extract_members=True,
+                    strip=1
+                )
+            except EOFError:
+                warning(f"Corrupted archive detected for {tar_path.name}; re-downloading.")
+                if tar_path.exists():
+                    tar_path.unlink()
+                download_url(url, str(tar_path.parent))
+                extract_tar(
+                    str(tar_path),
+                    str(self.root_path / 'raw' / 'files'),
+                    extract_members=True,
+                    strip=1
+                )
+
+        _extract_with_retry(refined_tar, refined_url)
+        _extract_with_retry(other_tar, other_url)
+
+        # general_PL index already contains refined + other entries plus affinities
         self.index_data = self.parse_pdbbind_PL_index(self.index_path)
 
     def download(self):
@@ -423,6 +469,17 @@ class MisatoProteinLigandDataset(Dataset):
 
         if not hasattr(self, "index_data"):
             self.download_labels()
+        # prefer a user-provided MD.hdf5 if present
+        alt_md_env = os.getenv("MISATO_MD_PATH")
+        if not self.md_path.exists() and alt_md_env:
+            alt_md = Path(alt_md_env)
+            if alt_md.exists():
+                self.md_path = alt_md
+        if not self.md_path.exists():
+            # also check common sibling location (raw/MD.hdf5) before downloading
+            alt_md = self.root_path / "raw" / "MD.hdf5"
+            if alt_md.exists():
+                self.md_path = alt_md
         if not self.md_path.exists():
             self.md_path.parent.mkdir(parents=True, exist_ok=True)
             md_url = "https://zenodo.org/records/7711953/files/MD.hdf5?download=1"
@@ -436,19 +493,22 @@ class MisatoProteinLigandDataset(Dataset):
             print(f"✅ Found {len(existing)} stacked PDB(s) in {self.pdb_out_dir}. Skipping export.")
             return
 
-        idx_ids = set(self.index_data.keys())
-        print(f"🔎 Scanning MISATO MD for overlap with PDBbind refined ({len(idx_ids)} IDs)...")
+        idx_ids = {k.lower() for k in self.index_data.keys()}
+        print("🔎 Scanning MISATO MD for labeled proteins...")
         with h5py.File(self.md_path, 'r', locking=False) as f:
-            overlap = [pid for pid in sorted(idx_ids)
-                       if pid.upper() in f and 'trajectory_coordinates' in f[pid.upper()]]
-        print(f"✅ Matched {len(overlap)} proteins present in MD.hdf5")
+            available = [pid for pid in sorted(f.keys()) if 'trajectory_coordinates' in f[pid]]
 
-        if not overlap:
-            warning("No overlap between PDBbind refined IDs and MISATO MD groups.")
+        labeled = [pid for pid in available if pid.lower() in idx_ids]
+        if self.limit:
+            labeled = labeled[:self.limit]
+
+        print(f"✅ Found {len(labeled)} labeled proteins present in MD.hdf5")
+        if not labeled:
+            warning("No labeled proteins present in both PDBbind (general_PL) and MISATO MD.")
             return
 
         print(f"🚀 Exporting CA-only stacked PDBs to: {self.pdb_out_dir}")
-        for pid in tqdm(overlap, desc="Export PDBs"):
+        for pid in tqdm(labeled, desc="Export PDBs"):
             try:
                 _export_one_struct(pid.upper(), self.md_path, self.mapdir, self.pdb_out_dir, self.num_frames)
             except Exception as e:
@@ -467,15 +527,17 @@ class MisatoProteinLigandDataset(Dataset):
 
     def _load_binding_site_mask(self, pdbid: str, residue_numbers: List[int]) -> List[int]:
         """Load binary mask for binding-site residues based on precomputed pockets."""
-        if not self.pocket_root:
+        if not self._pocket_roots:
             return [0] * len(residue_numbers)
         pid_low = pdbid.lower()
-        candidates = [
-            self.pocket_root / pid_low / f"{pid_low}_pocket.pdb",
-            self.pocket_root / pid_low / f"{pdbid}_pocket.pdb",
-            self.pocket_root / pdbid / f"{pid_low}_pocket.pdb",
-            self.pocket_root / pdbid / f"{pdbid}_pocket.pdb",
-        ]
+        candidates = []
+        for root in self._pocket_roots:
+            candidates.extend([
+                root / pid_low / f"{pid_low}_pocket.pdb",
+                root / pid_low / f"{pdbid}_pocket.pdb",
+                root / pdbid / f"{pid_low}_pocket.pdb",
+                root / pdbid / f"{pdbid}_pocket.pdb",
+            ])
         pocket_path = next((p for p in candidates if p.exists()), None)
         if pocket_path is None:
             return [0] * len(residue_numbers)
@@ -523,26 +585,9 @@ class MisatoProteinLigandDataset(Dataset):
         if not hasattr(self, "index_data"):
             self.index_data = self.parse_pdbbind_PL_index(self.index_path)
 
-        proteins = []
-        total_frames = 0
+        stats = {"proteins": 0, "frames": 0, "errors": 0}
         t0 = time.time()
         print(f"🔄 Starting to parse {len(paths)} PDB files...")
-        for i, p in enumerate(tqdm(paths, desc="Parsing PDBs")):
-            try:
-                rec = self.parse_pdb(p)
-                if rec is not None:
-                    proteins.append(rec)
-                    frames_in_protein = len(rec['residue']['x'])
-                    total_frames += frames_in_protein
-                    if (i + 1) % 50 == 0:
-                        print(f"  📊 Parsed {len(proteins)} proteins, {total_frames} total frames")
-            except Exception as e:
-                print(f"❌ Error parsing {os.path.basename(p)}: {e}")
-
-        if not proteins:
-            print("⚠️  No valid proteins parsed; nothing written.")
-            return
-        print(f"✅ Parsed {len(proteins)} proteins with {total_frames} total frames")
 
         SCHEMA = {
             "type": "record",
@@ -574,33 +619,40 @@ class MisatoProteinLigandDataset(Dataset):
             ]
         }
 
+        def record_iter():
+            for p in tqdm(paths, desc="Parsing PDBs"):
+                try:
+                    rec = self.parse_pdb(p)
+                except Exception as e:
+                    stats["errors"] += 1
+                    print(f"❌ Error parsing {os.path.basename(p)}: {e}")
+                    continue
+                if rec is None:
+                    continue
+                stats["proteins"] += 1
+                frames_in_protein = len(rec['residue']['x'])
+                stats["frames"] += frames_in_protein
+                if stats["proteins"] % 50 == 0:
+                    print(f"  📊 Parsed {stats['proteins']} proteins, {stats['frames']} total frames")
+                yield rec
+
         try:
-            from avro.schema import parse
-            from avro.datafile import DataFileWriter
-            from avro.io import DatumWriter
+            from fastavro import writer, parse_schema
+            parsed = parse_schema(SCHEMA)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            schema = parse(json.dumps(SCHEMA))
             with out_path.open("wb") as f:
-                w = DataFileWriter(f, DatumWriter(), schema)
-                w.set_meta("number_of_proteins", str(len(proteins)).encode("utf-8"))
-                for rec in tqdm(proteins, desc="Writing to Avro"):
-                    w.append(rec)
-                w.close()
+                writer(f, parsed, record_iter())
             dt = time.time() - t0
-            print(f"🎉 Wrote {len(proteins)} proteins → {out_path} in {dt:.1f}s")
-            print(f"📈 Total frames available: {total_frames}")
-        except Exception as e_avro:
-            try:
-                from fastavro import writer, parse_schema
-                parsed = parse_schema(SCHEMA)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                metadata = {'number_of_proteins': str(len(proteins))}
-                with out_path.open("wb") as f:
-                    writer(f, parsed, proteins, metadata=metadata)
-                dt = time.time() - t0
-                print(f"🎉 Wrote {len(proteins)} proteins → {out_path} in {dt:.1f}s (fastavro)")
-            except Exception as e_fast:
-                raise RuntimeError(f"Failed to write Avro: {e_avro}, {e_fast}")
+            if stats["proteins"] == 0:
+                print("⚠️  No valid proteins parsed; nothing written.")
+                if out_path.exists():
+                    out_path.unlink()
+                return
+            print(f"✅ Parsed {stats['proteins']} proteins with {stats['frames']} total frames")
+            print(f"🎉 Wrote {stats['proteins']} proteins → {out_path} in {dt:.1f}s")
+            print(f"📈 Total frames available: {stats['frames']}")
+        except Exception as e_fast:
+            raise RuntimeError(f"Failed to write Avro: {e_fast}")
 
     def parse_pdb(self, path: str) -> Dict[str, Any]:
         """Parse one stacked PDB into a structured dict."""
@@ -645,7 +697,7 @@ class MisatoProteinLigandDataset(Dataset):
         with path.open("rb") as f:
             yield from reader(f)
 
-    def proteins(self, resolution="residue"):
+    def proteins(self, resolution="residue", count_frames: bool = True):
         """
         Expand proteins from Avro into per-frame records.
         In precomputed mode, load our local Avro (no parent Zenodo link).
@@ -668,13 +720,20 @@ class MisatoProteinLigandDataset(Dataset):
             raise FileNotFoundError(f"No Avro found at {base_avro}. "
                                     f"{'Set PRECOMPUTED_URL or env MISATO_PRECOMPUTED_URL' if self._use_precomputed else 'Run parse() first.'}")
 
-        base_proteins = list(self.read_avro(base_avro))
-        total_frames = sum(len(p['residue']['x']) for p in base_proteins)
-        print(f"🔄 Expanding {len(base_proteins)} proteins into {total_frames} frames...")
+        total_frames = None
+        if count_frames:
+            total_proteins = 0
+            total_frames = 0
+            for prot in self.read_avro(base_avro):
+                total_proteins += 1
+                total_frames += len(prot['residue']['x'])
+            print(f"🔄 Expanding {total_proteins} proteins into {total_frames} frames...")
+        else:
+            print("🔄 Expanding proteins into frames (counting disabled)...")
 
         def _iter():
             frame_count = 0
-            for prot in base_proteins:
+            for prot in self.read_avro(base_avro):
                 frames = len(prot['residue']['x'])
                 # Ensure binding_site exists (for back-compat Avros)
                 if 'binding_site' not in prot['residue']:
@@ -685,8 +744,11 @@ class MisatoProteinLigandDataset(Dataset):
                 for f in range(frames):
                     frame_count += 1
                     if frame_count % 500 == 0:
-                        print(f"  📊 Expanded {frame_count}/{total_frames} frames "
-                              f"({frame_count/total_frames*100:.1f}%)")
+                        if total_frames:
+                            print(f"  📊 Expanded {frame_count}/{total_frames} frames "
+                                  f"({frame_count/total_frames*100:.1f}%)")
+                        else:
+                            print(f"  📊 Expanded {frame_count} frames...")
                     yield {
                         "protein": {
                             **prot["protein"],
@@ -704,3 +766,15 @@ class MisatoProteinLigandDataset(Dataset):
             print(f"✅ Finished expanding all {total_frames} frames")
 
         return Generator(_iter(), length=total_frames)
+
+
+if __name__ == "__main__":
+    ds = MisatoProteinLigandDataset(
+        root="data",
+        max_pdbs=None,
+        use_precomputed=True,   # set False to regenerate locally
+        n_jobs=8,
+        verbosity=2,
+    )
+    ds.parse()
+    print("Dataset ready.")
