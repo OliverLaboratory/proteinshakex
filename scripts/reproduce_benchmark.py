@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 from proteinshake.tasks import UNICORNETask, DANCETask, CFOLDTask
 from proteinshake.tasks.ensemble_prediction import (
-    discovery_rate, coverage_rate, ensemble_utility, earth_movers_distance,
+    discovery_rate, coverage_rate, ensemble_union, earth_movers_distance,
     hits_at_k, precision_at_k,
     HITS_TM_THRESHOLD, EMD_TM_FLOOR,
 )
@@ -106,7 +106,7 @@ def compute_all_metrics(task, experiment_data):
         # Core metrics
         dr = discovery_rate(sim_xy)
         cr = coverage_rate(sim_xy)
-        eu = ensemble_utility(sim_xy)
+        eu = ensemble_union(sim_xy)
         try:
             emd = earth_movers_distance(sim_xy)
         except Exception:

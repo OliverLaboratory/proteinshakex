@@ -4,7 +4,7 @@ Ensemble prediction task.
 
 Given a protein sequence, predict a set of 3D conformations.
 Evaluation uses TM-score-based metrics: Coverage Rate (CR),
-Discovery Rate (DR), Ensemble Utility (EU), and Earth Mover's
+Discovery Rate (DR), Ensemble Union (EU), and Earth Mover's
 Distance (EMD).
 """
 import os
@@ -137,7 +137,7 @@ def coverage_rate(sim_xy, threshold=HITS_TM_THRESHOLD):
     return 1.0 if discovery_rate(sim_xy, threshold) >= 1.0 else 0.0
 
 
-def ensemble_utility(sim_xy):
+def ensemble_union(sim_xy):
     """Mean of best TM-score per GT conformation.
 
     Parameters
@@ -589,7 +589,7 @@ class EnsemblePredictionTask(Task):
         return {
             'DR': discovery_rate(sim_xy, self.hits_threshold),
             'CR': coverage_rate(sim_xy, self.hits_threshold),
-            'EU': ensemble_utility(sim_xy),
+            'EU': ensemble_union(sim_xy),
             'EMD': earth_movers_distance(sim_xy, self.emd_floor),
         }
 
