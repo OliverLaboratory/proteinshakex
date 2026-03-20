@@ -171,7 +171,13 @@ class Dataset():
             pass#self.check_signature_same_as_hosted()
 
     def precomputed_already_downloaded(self):
-        return os.path.exists(f'{self.root}/{self.name}.residue.avro') or os.path.exists(f'{self.root}/{self.name}.atom.avro')
+        import glob as _glob
+        return (
+            os.path.exists(f'{self.root}/{self.name}.residue.avro')
+            or os.path.exists(f'{self.root}/{self.name}.atom.avro')
+            or bool(_glob.glob(f'{self.root}/{self.name}.residue.*.avro'))
+            or bool(_glob.glob(f'{self.root}/{self.name}.atom.*.avro'))
+        )
     
     def get_zenodo_record_id(self):
         """Get the latest Zenodo record ID from global metadata.
@@ -248,8 +254,37 @@ class Dataset():
         """
         if not self.signature == self.default_signature: error('The dataset arguments do not match the precomputed dataset arguments (the default settings). Set use_precomputed to False if you wish to generate a new dataset.', verbosity=self.verbosity)
 
+    def _find_avro_files(self, resolution):
+        """Return a list of avro file paths for the given resolution.
+
+        Supports both single-file (``Name.residue.avro``) and chunked
+        (``Name.residue.0.avro``, ``Name.residue.1.avro``, ...) layouts.
+        """
+        single = f'{self.root}/{self.name}.{resolution}.avro'
+        if os.path.exists(single):
+            # Also check for chunks alongside the single file
+            import glob as _glob
+            chunks = sorted(
+                _glob.glob(f'{self.root}/{self.name}.{resolution}.*.avro'),
+                key=lambda p: int(os.path.basename(p).split('.')[-2])
+            )
+            if chunks:
+                return [single] + chunks if single not in chunks else chunks
+            return [single]
+
+        # No single file — look for chunks only
+        import glob as _glob
+        chunks = sorted(
+            _glob.glob(f'{self.root}/{self.name}.{resolution}.*.avro'),
+            key=lambda p: int(os.path.basename(p).split('.')[-2])
+        )
+        return chunks
+
     def proteins(self, resolution='residue'):
-        """ Returns a generator of proteins from the avro file.
+        """ Returns a generator of proteins from the avro file(s).
+
+        Supports both single avro files and chunked avro files (e.g.
+        ``Name.atom.0.avro``, ``Name.atom.1.avro``, ...).
 
         Parameters
         ----------
@@ -267,13 +302,33 @@ class Dataset():
             >>> from proteinshake.datasets import RCSBDataset
             >>> protein = next(RCSBDataset().proteins())
         """
-        self.download_precomputed(resolution=resolution)
-        with open(f'{self.root}/{self.name}.{resolution}.avro', 'rb') as file:
-            total = int(avro_reader(file).metadata['number_of_proteins'])
+        avro_files = self._find_avro_files(resolution)
+        if not avro_files:
+            self.download_precomputed(resolution=resolution)
+            avro_files = self._find_avro_files(resolution)
+        if not avro_files:
+            raise FileNotFoundError(
+                f"No avro files found for {self.name}.{resolution} in {self.root}"
+            )
+
+        # Count total proteins across all files
+        total = 0
+        for path in avro_files:
+            with open(path, 'rb') as file:
+                meta = avro_reader(file).metadata
+                if 'number_of_proteins' in meta:
+                    total += int(meta['number_of_proteins'])
+                else:
+                    # Count by iterating (slower, fallback)
+                    file.seek(0)
+                    total += sum(1 for _ in avro_reader(file))
+
         def reader():
-            with open(f'{self.root}/{self.name}.{resolution}.avro', 'rb') as file:
-                for x in avro_reader(file):
-                    yield x
+            for path in avro_files:
+                with open(path, 'rb') as file:
+                    for x in avro_reader(file):
+                        yield x
+
         return Generator(reader(), total)
 
     @property
@@ -646,7 +701,7 @@ class Dataset():
     def parse(self):
         """ Parses all PDB files returned from :meth:`proteinshake.datasets.Dataset.get_raw_files()` and saves them to disk. Can run in parallel.
         """
-        if os.path.exists(f'{self.root}/{self.name}.residue.avro'):
+        if self._find_avro_files('residue'):
             return
         # parse and filter
         paths = self.get_raw_files()[:self.limit]
