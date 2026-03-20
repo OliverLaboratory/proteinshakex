@@ -12,6 +12,8 @@ from .gene_ontology import GeneOntologyTask
 from .virtual_screen import VirtualScreenTask
 from .ensemble_prediction import EnsemblePredictionTask, UNICORNETask, DANCETask, CFOLDTask
 from .allosteric_site_detection import AllostericSiteDetectionTask, ActiveSiteDetectionTask
+from .afdb_enzyme_class import AFDBEnzymeClassTask
+from .functional_site_task import AlloBenchFunctionalSiteTask
 
 classes = ['Task',
            'GeneOntologyTask',
@@ -30,6 +32,8 @@ classes = ['Task',
            'CFOLDTask',
            'AllostericSiteDetectionTask',
            'ActiveSiteDetectionTask',
+           'AFDBEnzymeClassTask',
+           'AlloBenchFunctionalSiteTask',
            ]
 
 __all__ = classes
