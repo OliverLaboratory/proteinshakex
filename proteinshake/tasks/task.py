@@ -44,32 +44,24 @@ class Task:
                  root                       = 'data',
                  split                      = 'random',
                  split_similarity_threshold = 0.7,
+                 lazy                       = False,
                  **kwargs
                 ):
         self.root = root
         self.dataset = self.DatasetClass(root=root, **kwargs)
-        proteins = self.dataset.proteins()
-        self.size = len(proteins)
         self.split_similarity_threshold = split_similarity_threshold
         self.split = split
-    
-        class Proteins(): # dummy class to implement __getitem__, could be implemented directly on the task
-            def __init__(self, proteins):
-                self.proteins = list(proteins)
 
-            def __len__(self):
-                return len(self.proteins)
+        if lazy:
+            # Lazy mode: random access backed by avro files on disk.
+            # No full dataset materialization — suitable for large datasets.
+            self.proteins = self.dataset.lazy_proteins()
+        else:
+            # Eager mode (original): load all proteins into memory.
+            from proteinshake.utils.lazy_proteins import EagerProteins
+            self.proteins = EagerProteins(self.dataset.proteins())
 
-            def __getitem__(self, idx):
-                try:
-                    idx = int(idx)
-                except:
-                    return [self.__getitem__(i) for i in idx]
-                if idx >= len(self.proteins):
-                    raise StopIteration
-                return self.proteins[idx]
-
-        self.proteins = Proteins(proteins)
+        self.size = len(self.proteins)
         self.name = self.__class__.__name__
 
         # load split indices
@@ -118,7 +110,7 @@ class Task:
         test_index
             Numpy array with the index of proteins in the test split.
         """
-        inds = list(range(len(self.dataset.proteins())))
+        inds = list(range(len(self.proteins)))
         train, test = train_test_split(inds, test_size=0.2)
         val, test = train_test_split(test, test_size=0.5)
 

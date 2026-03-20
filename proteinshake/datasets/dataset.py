@@ -331,6 +331,38 @@ class Dataset():
 
         return Generator(reader(), total)
 
+    def lazy_proteins(self, resolution='residue'):
+        """Return a :class:`LazyProteins` collection for random access without
+        loading the entire dataset into memory.
+
+        Supports both single and chunked avro files.  An offset index is built
+        on first call and cached to disk for subsequent loads.
+
+        Parameters
+        ----------
+        resolution : str, default ``'residue'``
+            ``'residue'`` or ``'atom'``.
+
+        Returns
+        -------
+        LazyProteins
+            A collection supporting ``__len__``, ``__getitem__``, and
+            ``__iter__`` backed by avro files on disk.
+        """
+        from proteinshake.utils.lazy_proteins import LazyProteins
+
+        avro_files = self._find_avro_files(resolution)
+        if not avro_files:
+            self.download_precomputed(resolution=resolution)
+            avro_files = self._find_avro_files(resolution)
+        if not avro_files:
+            raise FileNotFoundError(
+                f"No avro files found for {self.name}.{resolution} in {self.root}"
+            )
+
+        cache_path = os.path.join(self.root, f'{self.name}.{resolution}.index.pkl')
+        return LazyProteins(avro_files, cache_path=cache_path)
+
     @property
     def limit(self):
         """ Used only in testing, where this method is mock.patched to a small number. Default None.
