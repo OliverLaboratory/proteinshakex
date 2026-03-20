@@ -363,6 +363,30 @@ class Dataset():
         cache_path = os.path.join(self.root, f'{self.name}.{resolution}.index.pkl')
         return LazyProteins(avro_files, cache_path=cache_path)
 
+    def loader(self, resolution='residue', transform=None):
+        """Return a :class:`ProteinShakeLoader` for efficient PyTorch training.
+
+        On first call, converts avro file(s) into an indexed ProteinStore
+        (cached to disk).  Subsequent calls are instant.  The returned loader
+        supports ``__getitem__``, splits, transforms, and DataLoader creation.
+
+        Parameters
+        ----------
+        resolution : str
+            ``'residue'`` or ``'atom'``.
+        transform : callable, optional
+            Applied to each protein dict on access.
+
+        Returns
+        -------
+        ProteinShakeLoader
+        """
+        from proteinshake.loader import ProteinShakeLoader
+        return ProteinShakeLoader.from_dataset(
+            self, resolution=resolution, transform=transform,
+            verbosity=self.verbosity,
+        )
+
     @property
     def limit(self):
         """ Used only in testing, where this method is mock.patched to a small number. Default None.
