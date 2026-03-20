@@ -10,6 +10,8 @@ from .structure_search import StructureSearchTask
 from .structural_class import StructuralClassTask
 from .gene_ontology import GeneOntologyTask
 from .virtual_screen import VirtualScreenTask
+from .ensemble_prediction import EnsemblePredictionTask, UNICORNETask, DANCETask, CFOLDTask
+from .allosteric_site_detection import AllostericSiteDetectionTask, ActiveSiteDetectionTask
 
 classes = ['Task',
            'GeneOntologyTask',
@@ -21,7 +23,13 @@ classes = ['Task',
            'StructuralClassTask',
            'StructureSimilarityTask',
            'StructureSearchTask',
-           'VirtualScreenTask'
+           'VirtualScreenTask',
+           'EnsemblePredictionTask',
+           'UNICORNETask',
+           'DANCETask',
+           'CFOLDTask',
+           'AllostericSiteDetectionTask',
+           'ActiveSiteDetectionTask',
            ]
 
 __all__ = classes

@@ -29,7 +29,7 @@ import h5py
 from tqdm import tqdm
 from fastavro import reader
 
-from proteinshake.datasets import Dataset
+from proteinshake.datasets.multi_conf import MultiConfDataset
 from proteinshake.utils import extract_tar, download_url, warning, Generator
 
 
@@ -214,7 +214,7 @@ def _parse_stacked_ca_pdb_to_frames(pdb_path: Path, max_frames: Optional[int] = 
     return frames
 
 
-class MisatoProteinLigandDataset(Dataset):
+class MisatoProteinLigandDataset(MultiConfDataset):
     """
     ProteinShake-compatible dataset class for:
       - MISATO protein ensembles
@@ -479,7 +479,10 @@ class MisatoProteinLigandDataset(Dataset):
         pocket_path = next((p for p in candidates if p.exists()), None)
         if pocket_path is None:
             return [0] * len(residue_numbers)
-        pocket_df = self.pdb2df(str(pocket_path))
+        pocket_dfs = self.pdb2df(str(pocket_path))
+        if not pocket_dfs:
+            return [0] * len(residue_numbers)
+        pocket_df = pocket_dfs[0]
         col_atom = 'atom_type' if 'atom_type' in pocket_df.columns else (
             'atom_name' if 'atom_name' in pocket_df.columns else None
         )
@@ -617,6 +620,7 @@ class MisatoProteinLigandDataset(Dataset):
             'protein': {
                 'ID': pdbid,
                 'sequence': ''.join(resnames1),
+                'num_conformations': len(frames),
                 'kd': None,
                 'neglog_aff': None,
                 'resolution': None,

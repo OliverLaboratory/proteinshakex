@@ -11,7 +11,13 @@ from .scop import SCOPDataset
 from .protein_ligand_decoys import ProteinLigandDecoysDataset
 from .functional_site import FunctionalSiteDataset
 from .mcsa import MCSADataset
+from .multi_conf import MultiConfDataset
 from .misato_protein_ligand_interface import MisatoProteinLigandDataset
+from .unicorne import UNICORNEDataset
+from .dance import DANCEDataset
+from .cfold import CFOLDDataset
+from .allobench import AlloBenchDataset
+from .afdb_enzyme_commission import AFDBEnzymeCommissionDataset
 
 __all__ = [
     'Dataset',
@@ -27,7 +33,13 @@ __all__ = [
     'ProteinLigandDecoysDataset',
     'FunctionalSiteDataset',
     'MCSADataset',
-    'MisatoProteinLigandDataset'
+    'MisatoProteinLigandDataset',
+    'MultiConfDataset',
+    'UNICORNEDataset',
+    'DANCEDataset',
+    'CFOLDDataset',
+    'AlloBenchDataset',
+    'AFDBEnzymeCommissionDataset',
     ]
 
 classes = __all__
