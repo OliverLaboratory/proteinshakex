@@ -7,10 +7,9 @@ from functools import cached_property
 import numpy as np
 
 from proteinshake.datasets import AFDBEnzymeCommissionDataset
-from proteinshake.tasks import Task
 
 
-class AFDBEnzymeClassTask(Task):
+class AFDBEnzymeClassTask:
     """Predict the enzyme commission class from AlphaFold DB predicted structures.
 
     Uses the AFDBEnzymeCommissionDataset (~233k Swiss-Prot reviewed enzymes)
@@ -24,7 +23,8 @@ class AFDBEnzymeClassTask(Task):
       - Level 2: ~200+ classes (substrate specificity)
       - Level 3: ~1000+ classes (specific enzyme)
 
-    This is a protein-level multi-class prediction.
+    This is a protein-level multi-class prediction.  Splits are left to the
+    user (dataset is large enough for arbitrary train/val/test partitioning).
 
     .. admonition:: Task Summary
 
@@ -32,36 +32,68 @@ class AFDBEnzymeClassTask(Task):
         * **Output:** enzyme class label
         * **Evaluation:** Accuracy, Precision, Recall
 
+    Usage::
+
+        task = AFDBEnzymeClassTask(ec_level=2, root='data/afdb_ec')
+        print(task.num_classes)           # ~200+ at level 2
+        print(task.target(loader[0]))     # integer label
+        loader = task.loader()            # ProteinShakeLoader for training
+
     Parameters
     ----------
     ec_level : int, default 0
         EC hierarchy level (0-indexed). 0 = most general, 3 = most specific.
+    root : str, default 'data'
+        Root directory for the dataset.
+    **kwargs
+        Passed to ``AFDBEnzymeCommissionDataset``.
     """
-
-    DatasetClass = AFDBEnzymeCommissionDataset
 
     type = 'Multiclass Classification'
     input = 'Protein'
     output = 'Enzyme Commission (AFDB)'
 
-    def __init__(self, ec_level=0, *args, **kwargs):
+    def __init__(self, ec_level=0, root='data', **kwargs):
         self.ec_level = ec_level
-        super().__init__(*args, **kwargs)
+        self.dataset = AFDBEnzymeCommissionDataset(root=root, **kwargs)
+        self._loader = None
+
+    def loader(self, resolution='residue', transform=None):
+        """Return a :class:`ProteinShakeLoader` for this task.
+
+        Parameters
+        ----------
+        resolution : str
+            ``'residue'`` or ``'atom'``.
+        transform : callable, optional
+            Applied to each protein on access.
+
+        Returns
+        -------
+        ProteinShakeLoader
+        """
+        return self.dataset.loader(resolution=resolution, transform=transform)
+
+    @cached_property
+    def proteins(self):
+        """Lazy protein access via ProteinStore."""
+        from proteinshake.loader import ProteinShakeLoader
+        return ProteinShakeLoader.from_dataset(self.dataset, resolution='residue')
+
+    @cached_property
+    def size(self):
+        return len(self.proteins)
 
     @cached_property
     def token_map(self):
+        """Build token map by streaming through all proteins."""
         labels = set()
-        for p in self.proteins:
+        for p in self.dataset.proteins():
             ec = p['protein']['EC']
             parts = ec.split('.')
             if len(parts) > self.ec_level:
                 labels.add(parts[self.ec_level])
         return {label: i for i, label in enumerate(sorted(labels))}
-
-    def dummy_output(self):
-        import random
-        tokens = list(self.token_map.values())
-        return [random.choice(tokens) for _ in range(len(self.test_targets))]
 
     @property
     def num_classes(self):
@@ -72,29 +104,18 @@ class AFDBEnzymeClassTask(Task):
         return ('protein', 'multi_class')
 
     @property
-    def task_in(self):
-        return 'protein'
-
-    @property
-    def task_out(self):
-        return 'multi_class'
-
-    @property
-    def target_dim(self):
-        return len(self.token_map)
-
-    @property
     def num_features(self):
         return 20
 
     def target(self, protein):
+        """Return integer label for a protein dict."""
         ec = protein['protein']['EC']
         parts = ec.split('.')
         if len(parts) > self.ec_level:
             label = parts[self.ec_level]
             if label in self.token_map:
                 return self.token_map[label]
-        return -1  # unknown
+        return -1
 
     @property
     def default_metric(self):
