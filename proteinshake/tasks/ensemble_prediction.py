@@ -50,14 +50,16 @@ def _compute_tm_pair(ca, cb, seq):
     seq_a = seq[:ca.shape[0]] if len(seq) >= ca.shape[0] else seq + 'A' * (ca.shape[0] - len(seq))
     seq_b = seq[:cb.shape[0]] if len(seq) >= cb.shape[0] else seq + 'A' * (cb.shape[0] - len(seq))
 
+    # Normalization convention: max(tm_norm_chain1, tm_norm_chain2),
+    # i.e. min-length-normalized TM (matches the rest of the
+    # ConformationDiscoveryBenchmark figures and tables, which moved off
+    # the older "average of 2" convention).
+
     # Try C++ TMalign first
     try:
         from conformation_benchmark.evaluation.tmalign_exe import tm_align as _tm_align_exe
-        tm1_ab, tm2_ab = _tm_align_exe(ca, cb, seq_a, seq_b)
-        tm1_ba, tm2_ba = _tm_align_exe(cb, ca, seq_b, seq_a)
-        tm_ab = (tm1_ab + tm2_ab) / 2
-        tm_ba = (tm1_ba + tm2_ba) / 2
-        return float((tm_ab + tm_ba) / 2)
+        tm1, tm2, _ = _tm_align_exe(ca, cb, seq_a, seq_b)
+        return float(max(tm1, tm2))
     except (ImportError, RuntimeError, FileNotFoundError):
         pass
 
@@ -69,11 +71,8 @@ def _compute_tm_pair(ca, cb, seq):
             "TM-score computation requires either TMalign C++ executable "
             "or tmtools: pip install tmtools"
         )
-    res_ab = tm_align(ca, cb, seq_a, seq_b)
-    res_ba = tm_align(cb, ca, seq_b, seq_a)
-    tm_ab = (res_ab.tm_norm_chain1 + res_ab.tm_norm_chain2) / 2
-    tm_ba = (res_ba.tm_norm_chain1 + res_ba.tm_norm_chain2) / 2
-    return float((tm_ab + tm_ba) / 2)
+    res = tm_align(ca, cb, seq_a, seq_b)
+    return float(max(res.tm_norm_chain1, res.tm_norm_chain2))
 
 
 def compute_tm_matrix(conformations_a, conformations_b, sequence, n_workers=TM_WORKERS):
@@ -675,20 +674,24 @@ class EnsemblePredictionTask(Task):
 # --------------- Dataset-specific task classes ---------------
 
 class UNICORNETask(EnsemblePredictionTask):
-    """Ensemble prediction on UNICORNE (same-protein multi-conformation).
+    """Ensemble prediction on UNICORNE_BENCH (same-protein multi-conformation).
 
-    648 proteins with 2-17 experimental conformations each.
-    Conformations are sequence-aligned to the UniProt reference.
+    ~870 UniProts each with 2-N experimental conformations from distinct
+    PDB depositions, sequence-aligned to the UniProt reference. Backed by
+    :class:`UNICORNEDataset`, which applies the v2 quality filter
+    (`filtered_ensembles_v2.csv`) and the fold-quality blacklist
+    (`fold_quality_blacklist.csv`, drops artifactual / IDP / fibril GTs).
 
-    With ``split='benchmark'``, skips GT deduplication (UNICORNE is
-    pre-filtered) but still applies length filtering and MIN_GT.
+    With ``split='benchmark'``, skips GT deduplication (UNICORNE_BENCH is
+    pre-deduped at GT-GT TM ≤ 0.85) but still applies length filtering
+    and the MIN_GT cutoff.
 
     Usage::
 
         from proteinshake.tasks import UNICORNETask
         task = UNICORNETask(split='benchmark')
     """
-    skip_dedup = True  # UNICORNE is pre-filtered, no dedup needed
+    skip_dedup = True  # UNICORNE_BENCH is pre-deduped, no dedup needed
 
     def __init__(self, root='data', **kwargs):
         from proteinshake.datasets import UNICORNEDataset

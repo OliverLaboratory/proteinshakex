@@ -140,7 +140,7 @@ def _align_seq_to_ref(ref_seq, query_seq):
 
 
 class UNICORNEDataset(MultiConfDataset):
-    """Multi-conformation dataset from the UNICORNE benchmark.
+    """Multi-conformation dataset from the UNICORNE_BENCH benchmark.
 
     Each protein entry contains multiple experimental structures (from
     different PDB depositions) that have been pre-aligned. Conformations
@@ -158,27 +158,37 @@ class UNICORNEDataset(MultiConfDataset):
     root : str
         Data root directory for processed output.
     unicorne_path : str
-        Path to the UNICORNE data directory containing ``input_pdbs/``
-        and ``input_dataset.csv``.
+        Path to the UNICORNE_BENCH data directory containing
+        ``input_pdbs/`` and ``input_dataset.csv``. Defaults to the
+        UNICORNE_BENCH directory shipped alongside this package's
+        sibling ConformationDiscoveryBenchmark repo.
     use_filtered : bool
-        If True, only include conformations that passed UNICORNE quality
-        filtering (from ``filtered_ensembles.csv``).
+        If True, only include conformations that passed UNICORNE_BENCH
+        quality filtering (from ``filtered_ensembles_v2.csv``).
+    apply_blacklist : bool
+        If True, exclude UniProts listed in ``fold_quality_blacklist.csv``
+        (artifactual / IDP / fibril GTs that aren't bona fide multi-state
+        ensembles — Lysozyme C amyloid fibril, IDP-NMR cases, TFE-induced
+        opening, etc.).
     """
 
     exlude_args_from_signature = ['unicorne_path']
 
     def __init__(self,
                  root='data',
-                 unicorne_path='../ConformationDiscoveryBenchmark/data/inputs/UNICORNE',
+                 unicorne_path='../ConformationDiscoveryBenchmark/data/inputs/UNICORNE_BENCH',
                  use_filtered=True,
+                 apply_blacklist=True,
                  use_precomputed=True,
                  n_jobs=1,
                  verbosity=2,
                  **kwargs):
         self.unicorne_path = unicorne_path
         self.use_filtered = use_filtered
+        self.apply_blacklist = apply_blacklist
         self._metadata = None
         self._filtered_indices = None
+        self._blacklist = None
         super().__init__(
             root=root,
             use_precomputed=use_precomputed,
@@ -192,32 +202,59 @@ class UNICORNEDataset(MultiConfDataset):
         return 'UNICORNEDataset'
 
     def _load_metadata(self):
-        """Load and cache the input_dataset.csv metadata."""
+        """Load and cache input_dataset.csv (or benchmarking-dataset-13.csv).
+
+        The UNICORNE_BENCH source-of-truth for sequence + representative
+        structures is `benchmarking-dataset-13.csv`; older drops shipped a
+        `input_dataset.csv`. Try both.
+        """
         if self._metadata is not None:
             return self._metadata
-        csv_path = os.path.join(self.unicorne_path, 'input_dataset.csv')
         self._metadata = {}
-        with open(csv_path, 'r') as f:
-            for row in csv.DictReader(f):
-                self._metadata[row['uniprot']] = row
+        for fname in ('benchmarking-dataset-13.csv', 'input_dataset.csv'):
+            csv_path = os.path.join(self.unicorne_path, fname)
+            if os.path.exists(csv_path):
+                with open(csv_path, 'r') as f:
+                    for row in csv.DictReader(f):
+                        eid = row.get('uniprot') or row.get('ensemble_ID')
+                        if eid:
+                            self._metadata[eid] = row
+                break
         return self._metadata
 
     def _load_filtered_indices(self):
-        """Load and cache the filtered_ensembles.csv data."""
+        """Load filtered_ensembles_v2.csv (preferred) or v1 fallback."""
         if self._filtered_indices is not None:
             return self._filtered_indices
-        csv_path = os.path.join(self.unicorne_path, 'filtered_ensembles.csv')
         self._filtered_indices = {}
-        if os.path.exists(csv_path):
-            with open(csv_path, 'r') as f:
-                for row in csv.DictReader(f):
-                    indices = [int(x) for x in row['kept_indices'].split(';')]
-                    self._filtered_indices[row['ensemble_ID']] = {
-                        'kept_indices': indices,
-                        'avg_pairwise_tm': float(row['avg_pairwise_tm']),
-                        'min_pairwise_tm': float(row['min_pairwise_tm']),
-                    }
+        for fname in ('filtered_ensembles_v2.csv', 'filtered_ensembles.csv'):
+            csv_path = os.path.join(self.unicorne_path, fname)
+            if os.path.exists(csv_path):
+                with open(csv_path, 'r') as f:
+                    for row in csv.DictReader(f):
+                        indices = [int(x) for x in row['kept_indices'].split(';')]
+                        self._filtered_indices[row['ensemble_ID']] = {
+                            'kept_indices': indices,
+                            'avg_pairwise_tm': float(row['avg_pairwise_tm']),
+                            'min_pairwise_tm': float(row['min_pairwise_tm']),
+                        }
+                break
         return self._filtered_indices
+
+    def _load_blacklist(self):
+        """Load fold_quality_blacklist.csv — UniProts whose GT structures
+        are artifactual / IDP / fibril and shouldn't be evaluated as
+        multi-state ensembles. See data/inputs/UNICORNE_BENCH/
+        fold_quality_blacklist.csv for the curated list and reasons."""
+        if self._blacklist is not None:
+            return self._blacklist
+        self._blacklist = set()
+        f = os.path.join(self.unicorne_path, 'fold_quality_blacklist.csv')
+        if os.path.exists(f):
+            with open(f, 'r') as fh:
+                for row in csv.DictReader(fh):
+                    self._blacklist.add((row.get('uniprot') or '').strip())
+        return self._blacklist
 
     def download(self):
         """Verify that the UNICORNE data directory exists.
@@ -272,7 +309,14 @@ class UNICORNEDataset(MultiConfDataset):
         if uniprot_id in self.exclude_ids:
             return None
 
+        # Fold-quality blacklist (artifactual / IDP / fibril GTs).
+        if self.apply_blacklist and uniprot_id in self._load_blacklist():
+            return None
+
         cif_files = sorted(glob.glob(os.path.join(path, '*-aligned.cif')))
+        if not cif_files:
+            # Fall back to .pdb for ensembles whose canonical files are PDB.
+            cif_files = sorted(glob.glob(os.path.join(path, '*-aligned.pdb')))
         if not cif_files:
             return None
 
